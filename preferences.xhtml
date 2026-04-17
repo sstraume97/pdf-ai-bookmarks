@@ -9,26 +9,26 @@
 
     <groupbox>
         <label>
-            <html:h2>Gemini API Configuration</html:h2>
+            <html:h2 data-l10n-id="pdf-ai-bookmarks-prefs-api-group-title"></html:h2>
         </label>
 
         <hbox align="center">
-            <label value="API Key:" control="pdf-ai-bookmarks-api-key" style="width: 80px;" />
-            <html:input id="pdf-ai-bookmarks-api-key" type="password" placeholder="Enter your Gemini API key"
+            <label data-l10n-id="pdf-ai-bookmarks-prefs-api-key-label" control="pdf-ai-bookmarks-api-key" style="width: 80px;" />
+            <html:input id="pdf-ai-bookmarks-api-key" type="password"
+                data-l10n-id="pdf-ai-bookmarks-prefs-api-key-input"
                 preference="extensions.pdf-ai-bookmarks.apiKey" />
         </hbox>
 
-        <description style="color: gray; font-size: 0.9em; margin-top: 5px;">
-            Get your API key from: https://aistudio.google.com/app/apikey
-        </description>
+        <description data-l10n-id="pdf-ai-bookmarks-prefs-api-key-help"
+            style="color: gray; font-size: 0.9em; margin-top: 5px;"></description>
     </groupbox>
 
     <groupbox>
         <label>
-            <html:h2>Options</html:h2>
+            <html:h2 data-l10n-id="pdf-ai-bookmarks-prefs-options-group-title"></html:h2>
         </label>
 
-        <checkbox id="pdf-ai-bookmarks-polish" label="Polish existing bookmarks (if present)"
+        <checkbox id="pdf-ai-bookmarks-polish" data-l10n-id="pdf-ai-bookmarks-prefs-polish-label"
             preference="extensions.pdf-ai-bookmarks.polish" />
     </groupbox>
 </vbox>

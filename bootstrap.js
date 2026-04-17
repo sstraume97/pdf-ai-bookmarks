@@ -1,4 +1,6 @@
 var PDFAIBookmarks;
+var PDFAIBookmarks_MenuRegistration = null;
+const PDFAIBookmarks_PLUGIN_ID = "pdf-ai-bookmarks@edwintuan.com";
 
 function log(msg) {
     Zotero.debug("PDF AI Bookmarks: " + msg);
@@ -11,9 +13,13 @@ function install() {
 async function startup({ id, version, rootURI }) {
     log("Starting " + version);
 
+    if (Zotero.initializationPromise) {
+        await Zotero.initializationPromise;
+    }
+
     // Register preferences pane
     Zotero.PreferencePanes.register({
-        pluginID: 'pdf-ai-bookmarks@antigravity.com',
+        pluginID: PDFAIBookmarks_PLUGIN_ID,
         src: rootURI + 'preferences.xhtml',
         scripts: [rootURI + 'preferences.js']
     });
@@ -23,21 +29,31 @@ async function startup({ id, version, rootURI }) {
 
     // Load main plugin logic
     Services.scriptloader.loadSubScript(rootURI + 'pdf-ai-bookmarks.js');
-    PDFAIBookmarks.init({ id, version, rootURI });
+    PDFAIBookmarks.init({ id, version, rootURI, pluginID: PDFAIBookmarks_PLUGIN_ID });
     PDFAIBookmarks.addToAllWindows();
+    PDFAIBookmarks_MenuRegistration = PDFAIBookmarks.registerMenu();
 }
 
 function onMainWindowLoad({ window }) {
-    PDFAIBookmarks.addToWindow(window);
+    if (PDFAIBookmarks) {
+        PDFAIBookmarks.addToWindow(window);
+    }
 }
 
-function onMainWindowUnload({ window }) {
-    PDFAIBookmarks.removeFromWindow(window);
-}
+function onMainWindowUnload() {}
 
 function shutdown() {
     log("Shutting down");
-    PDFAIBookmarks.removeFromAllWindows();
+
+    if (PDFAIBookmarks) {
+        PDFAIBookmarks.unregisterMenu(PDFAIBookmarks_MenuRegistration);
+    }
+    PDFAIBookmarks_MenuRegistration = null;
+
+    if (Zotero.PreferencePanes && typeof Zotero.PreferencePanes.unregister === "function") {
+        Zotero.PreferencePanes.unregister(PDFAIBookmarks_PLUGIN_ID);
+    }
+
     PDFAIBookmarks = undefined;
 }
 

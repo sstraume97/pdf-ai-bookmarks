@@ -4,12 +4,18 @@ PDFAIBookmarks = {
     id: null,
     version: null,
     rootURI: null,
-    addedElementIDs: [],
+    pluginID: null,
+    menuID: "pdf-ai-bookmarks-generate",
+    menuRegistrationID: null,
+    maxInlineBytes: 20 * 1024 * 1024,
+    maxFileBytes: 50 * 1024 * 1024,
+    maxDocumentPages: 1000,
 
-    init({ id, version, rootURI }) {
+    init({ id, version, rootURI, pluginID }) {
         this.id = id;
         this.version = version;
         this.rootURI = rootURI;
+        this.pluginID = pluginID || id;
     },
 
     log(msg) {
@@ -68,7 +74,7 @@ PDFAIBookmarks = {
         }
 
         if (ArrayBuffer.isView(data)) {
-            return new Uint8Array(data.buffer);
+            return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
         }
 
         if (typeof data === 'string') {
@@ -92,6 +98,121 @@ PDFAIBookmarks = {
             binaryChunks.push(String.fromCharCode.apply(null, chunk));
         }
         return btoa(binaryChunks.join(''));
+    },
+
+    getGeminiModel() {
+        return "gemini-2.5-flash";
+    },
+
+    getGeminiResponseSchema() {
+        return {
+            type: "array",
+            items: {
+                type: "object",
+                properties: {
+                    title: { type: "string" },
+                    page_number: { type: "integer" },
+                    level: { type: "integer" }
+                },
+                required: ["title", "page_number", "level"]
+            }
+        };
+    },
+
+    getDisplayNameFromPath(path) {
+        const normalizedPath = this.normalizePath(path);
+        if (!normalizedPath) {
+            return "pdf-ai-bookmarks.pdf";
+        }
+
+        const parts = normalizedPath.split(/[\\/]/);
+        return parts[parts.length - 1] || "pdf-ai-bookmarks.pdf";
+    },
+
+    getMenuLabel() {
+        return "Generate PDF AI Bookmarks";
+    },
+
+    applyMenuLabel(context) {
+        const menuElem = context?.menuElem;
+        if (!menuElem) {
+            return;
+        }
+
+        const label = this.getMenuLabel();
+        menuElem.removeAttribute("data-l10n-id");
+        menuElem.removeAttribute("data-l10n-args");
+        menuElem.label = label;
+        menuElem.setAttribute("label", label);
+    },
+
+    ensureWindowLocale(window) {
+        try {
+            if (window?.MozXULElement?.insertFTLIfNeeded) {
+                window.MozXULElement.insertFTLIfNeeded("pdf-ai-bookmarks.ftl");
+            }
+        } catch (e) {
+            this.log("Failed to register main-window localization: " + e);
+        }
+    },
+
+    normalizeGeminiFileName(fileName) {
+        if (!fileName) {
+            return null;
+        }
+
+        return fileName.startsWith("files/") ? fileName : `files/${fileName}`;
+    },
+
+    buildGeminiRequest(parts) {
+        return {
+            contents: [{
+                parts
+            }],
+            generationConfig: {
+                response_mime_type: "application/json",
+                response_schema: this.getGeminiResponseSchema()
+            }
+        };
+    },
+
+    extractGeminiText(data) {
+        const parts = data?.candidates?.[0]?.content?.parts || [];
+        const text = parts.map(part => part?.text || "").join("").trim();
+
+        if (text) {
+            return text;
+        }
+
+        const blockReason = data?.promptFeedback?.blockReason;
+        if (blockReason) {
+            throw new Error(`Gemini API returned no content (${blockReason})`);
+        }
+
+        throw new Error("Gemini API returned no content");
+    },
+
+    parseGeminiBookmarks(text) {
+        const trimmed = String(text || "").trim();
+        const fencedMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+        const normalized = fencedMatch ? fencedMatch[1].trim() : trimmed;
+
+        let bookmarks;
+        try {
+            bookmarks = JSON.parse(normalized);
+        } catch (e) {
+            throw new Error(`Gemini API returned invalid JSON: ${e.message}`);
+        }
+
+        if (!Array.isArray(bookmarks)) {
+            throw new Error("Gemini API did not return a JSON array");
+        }
+
+        return bookmarks;
+    },
+
+    parseGeminiBookmarksFromPayload(data) {
+        return this.parseGeminiBookmarks(this.extractGeminiText(data));
     },
 
     buildPrompt(existingToc, opts = {}) {
@@ -219,10 +340,11 @@ CRITICAL RULES FOR CHUNK MODE:
     async waitForFileActive(fileName, maxWaitMs = 120000) {
         const apiKey = this.getApiKey();
         const startTime = Date.now();
+        const resourceName = this.normalizeGeminiFileName(fileName);
 
         while (Date.now() - startTime < maxWaitMs) {
             try {
-                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`);
+                const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/${resourceName}?key=${apiKey}`);
                 if (!res.ok) {
                     this.log(`File status check failed: ${res.status}`);
                     await Zotero.Promise.delay(2000);
@@ -240,6 +362,9 @@ CRITICAL RULES FOR CHUNK MODE:
 
                 await Zotero.Promise.delay(2000);
             } catch (e) {
+                if (String(e.message).startsWith("File processing failed:")) {
+                    throw e;
+                }
                 this.log(`File status check error: ${e}`);
                 await Zotero.Promise.delay(2000);
             }
@@ -251,8 +376,9 @@ CRITICAL RULES FOR CHUNK MODE:
     async deleteGeminiFile(fileName) {
         if (!fileName) return;
         const apiKey = this.getApiKey();
+        const resourceName = this.normalizeGeminiFileName(fileName);
         try {
-            await fetch(`https://generativelanguage.googleapis.com/v1beta/files/${fileName}?key=${apiKey}`, {
+            await fetch(`https://generativelanguage.googleapis.com/v1beta/${resourceName}?key=${apiKey}`, {
                 method: 'DELETE'
             });
         } catch (_) {
@@ -334,10 +460,48 @@ CRITICAL RULES FOR CHUNK MODE:
         await Zotero.File.putContentsAsync(path, data);
     },
 
+    async generateBookmarksWithFileUpload(pdfBytes, pdfPath, existingToc, opts = {}, onProgress = null, progressRange = {}) {
+        let uploadInfo = null;
+        const uploadStart = progressRange.uploadStart ?? 40;
+        const uploadEnd = progressRange.uploadEnd ?? 60;
+        const waitProgress = progressRange.wait ?? 65;
+        const analyzeProgress = progressRange.analyze ?? 75;
+        const uploadLabel = progressRange.uploadLabel || "Uploading PDF to Gemini...";
+        const waitLabel = progressRange.waitLabel || "Waiting for Gemini to process PDF...";
+        const analyzeLabel = progressRange.analyzeLabel || "Analyzing PDF with Gemini...";
+
+        try {
+            if (onProgress) onProgress(uploadStart, uploadLabel);
+            uploadInfo = await this.uploadFileToGemini(
+                pdfBytes,
+                "application/pdf",
+                this.getDisplayNameFromPath(pdfPath),
+                (percent) => {
+                    if (onProgress) {
+                        const mappedPercent = uploadStart + Math.round((percent / 100) * (uploadEnd - uploadStart));
+                        onProgress(mappedPercent, `${uploadLabel} ${percent}%`);
+                    }
+                }
+            );
+
+            if (uploadInfo.fileState !== "ACTIVE") {
+                if (onProgress) onProgress(waitProgress, waitLabel);
+                await this.waitForFileActive(uploadInfo.fileName);
+            }
+
+            if (onProgress) onProgress(analyzeProgress, analyzeLabel);
+            return await this.callGeminiAPIWithFile(uploadInfo.fileUri, existingToc, opts);
+        } finally {
+            if (uploadInfo?.fileName) {
+                await this.deleteGeminiFile(uploadInfo.fileName);
+            }
+        }
+    },
+
     async generateBookmarks(pdfPath, onProgress = null) {
         const apiKey = this.getApiKey();
         if (!apiKey) {
-            throw new Error("API Key not configured. Please set it in Tools -> Preferences -> PDF AI Bookmarks.");
+            throw new Error("API key not configured. Open Settings -> PDF AI Bookmarks and enter your Gemini API key.");
         }
 
         if (onProgress) onProgress(10, "Reading PDF...");
@@ -389,34 +553,32 @@ CRITICAL RULES FOR CHUNK MODE:
         // Using global PDFLib object
         const pdfDoc = await PDFLib.PDFDocument.load(pdfBytes);
         const existingToc = this.extractTOC(pdfDoc);
+        const totalPages = pdfDoc.getPageCount();
 
         this.log(`Found ${existingToc.length} existing bookmarks`);
 
-        // Convert PDF to base64 for Gemini API (standard buffer to base64)
         const len = pdfBytes.byteLength;
-        // As of 2026-01-12, inline data limit increased from 20MB to 100MB
-        // https://blog.google/innovation-and-ai/technology/developers-tools/gemini-api-new-file-limits/
-        const MAX_INLINE_BYTES = 100 * 1024 * 1024;
-        const MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024;
         let newBookmarks = [];
 
-        if (len <= MAX_INLINE_BYTES) {
+        if (len <= this.maxInlineBytes && totalPages <= this.maxDocumentPages) {
             if (onProgress) onProgress(40, "Preparing for upload...");
             this.log("Converting to base64...");
             const base64Pdf = this.bytesToBase64(pdfBytes);
 
-            // Call Gemini API
             if (onProgress) onProgress(60, "Uploading to Gemini...");
             this.log("Calling Gemini AI...");
             newBookmarks = await this.callGeminiAPI(base64Pdf, existingToc, {
-                totalPages: pdfDoc.getPageCount()
+                totalPages
             });
+        } else if (len <= this.maxFileBytes && totalPages <= this.maxDocumentPages) {
+            this.log(`Large PDF detected (${len} bytes, ~${Math.round(len / 1024 / 1024)}MB). Using Gemini Files API.`);
+            newBookmarks = await this.generateBookmarksWithFileUpload(pdfBytes, pdfPath, existingToc, {
+                totalPages
+            }, onProgress);
         } else {
-            // Large file: Gemini models have token limits that prevent processing very large PDFs
-            // Use chunked upload strategy - split PDF into smaller parts
-            this.log(`Large PDF detected (${len} bytes, ~${Math.round(len/1024/1024)}MB). Using chunked upload strategy.`);
-            if (onProgress) onProgress(40, "Splitting large PDF...");
-            newBookmarks = await this.generateBookmarksChunked(pdfDoc, existingToc, onProgress, len, MAX_INLINE_BYTES);
+            this.log(`PDF exceeds direct Gemini limits (${Math.round(len / 1024 / 1024)}MB, ${totalPages} pages). Using chunked upload strategy.`);
+            if (onProgress) onProgress(40, "Splitting PDF into Gemini-friendly chunks...");
+            newBookmarks = await this.generateBookmarksChunked(pdfDoc, pdfPath, existingToc, onProgress, len);
         }
 
         this.log(`Gemini generated ${newBookmarks.length} bookmarks`);
@@ -465,19 +627,15 @@ CRITICAL RULES FOR CHUNK MODE:
         }).filter(Boolean);
     },
 
-    async generateBookmarksChunked(pdfDoc, existingToc, onProgress, totalBytes, maxInlineBytes) {
+    async generateBookmarksChunked(pdfDoc, pdfPath, existingToc, onProgress, totalBytes) {
         const totalPages = pdfDoc.getPageCount();
-        
-        // Base64 encoding adds ~33% overhead
-        // Target 35MB raw data (= ~47MB base64) - 48MB worked before, 55MB failed
-        // Using XHR now which should be more reliable than fetch
-        const TARGET_CHUNK_RAW_BYTES = 35 * 1024 * 1024;
+        const TARGET_CHUNK_RAW_BYTES = 40 * 1024 * 1024;
         const avgBytesPerPage = totalBytes / totalPages;
-        // Cap at 500 pages per chunk
         const pagesPerChunk = Math.max(20, Math.min(500, Math.floor(TARGET_CHUNK_RAW_BYTES / avgBytesPerPage)));
         const chunkTotal = Math.ceil(totalPages / pagesPerChunk);
+        const baseName = this.getDisplayNameFromPath(pdfPath).replace(/\.pdf$/i, "");
 
-        this.log(`Chunked upload: ${totalBytes} bytes (${totalPages} pages), avg ${Math.round(avgBytesPerPage/1024)}KB/page, ${pagesPerChunk} pages/chunk, ${chunkTotal} chunks total.`);
+        this.log(`Chunked upload: ${totalBytes} bytes (${totalPages} pages), avg ${Math.round(avgBytesPerPage / 1024)}KB/page, ${pagesPerChunk} pages/chunk, ${chunkTotal} chunks total.`);
         if (onProgress) onProgress(40, "Splitting PDF for upload...");
 
         const chunks = [];
@@ -497,26 +655,46 @@ CRITICAL RULES FOR CHUNK MODE:
             const copiedPages = await chunkDoc.copyPages(pdfDoc, pageIndexes);
             copiedPages.forEach(page => chunkDoc.addPage(page));
             const chunkBytes = await chunkDoc.save();
-            const chunkSizeMB = Math.round(chunkBytes.byteLength/1024/1024*100)/100;
+            const chunkSizeMB = Math.round(chunkBytes.byteLength / 1024 / 1024 * 100) / 100;
+            const progressStart = 45 + Math.floor((idx / chunkTotal) * 35);
+            const progressEnd = 45 + Math.floor(((idx + 1) / chunkTotal) * 35);
+            const chunkDisplayName = `${baseName || "pdf-ai-bookmarks"}-part-${idx + 1}.pdf`;
 
-            this.log(`Chunk ${idx+1} size: ${chunkSizeMB}MB (${end-start} pages), converting to base64...`);
-            const base64Pdf = this.bytesToBase64(chunkBytes);
-            const base64SizeMB = Math.round(base64Pdf.length/1024/1024*100)/100;
-            this.log(`Chunk ${idx+1} base64 size: ${base64SizeMB}MB`);
+            this.log(`Chunk ${idx + 1} size: ${chunkSizeMB}MB (${end - start} pages)`);
 
-            const progressBase = 50;
-            const progressSpan = 30;
-            const progress = progressBase + Math.floor((idx / chunkTotal) * progressSpan);
-            if (onProgress) onProgress(progress, `Uploading chunk ${idx + 1}/${chunkTotal} (${base64SizeMB}MB)...`);
+            let chunkBookmarks;
+            if (chunkBytes.byteLength <= this.maxInlineBytes && end - start <= this.maxDocumentPages) {
+                if (onProgress) onProgress(progressStart, `Analyzing chunk ${idx + 1}/${chunkTotal}...`);
+                const base64Pdf = this.bytesToBase64(chunkBytes);
+                chunkBookmarks = await this.callGeminiAPI(base64Pdf, existingToc, {
+                    totalPages,
+                    chunkStart: start + 1,
+                    chunkEnd: end
+                });
+            } else {
+                chunkBookmarks = await this.generateBookmarksWithFileUpload(
+                    chunkBytes,
+                    chunkDisplayName,
+                    existingToc,
+                    {
+                        totalPages,
+                        chunkStart: start + 1,
+                        chunkEnd: end
+                    },
+                    onProgress,
+                    {
+                        uploadStart: progressStart,
+                        uploadEnd: Math.min(progressStart + 10, progressEnd),
+                        wait: Math.min(progressStart + 15, progressEnd),
+                        analyze: progressEnd,
+                        uploadLabel: `Uploading chunk ${idx + 1}/${chunkTotal} to Gemini...`,
+                        waitLabel: `Waiting for Gemini to process chunk ${idx + 1}/${chunkTotal}...`,
+                        analyzeLabel: `Analyzing chunk ${idx + 1}/${chunkTotal}...`
+                    }
+                );
+            }
 
-            this.log(`Sending chunk ${idx+1} to Gemini API...`);
-            const chunkBookmarks = await this.callGeminiAPI(base64Pdf, existingToc, {
-                totalPages,
-                chunkStart: start + 1,
-                chunkEnd: end,
-                chunkPages: end - start
-            });
-            this.log(`Chunk ${idx+1} returned ${chunkBookmarks.length} bookmarks`);
+            this.log(`Chunk ${idx + 1} returned ${chunkBookmarks.length} bookmarks`);
 
             return this.normalizeChunkBookmarks(chunkBookmarks, start + 1, end);
         });
@@ -556,35 +734,15 @@ CRITICAL RULES FOR CHUNK MODE:
     async callGeminiAPI(base64Pdf, existingToc, opts = {}) {
         const apiKey = this.getApiKey();
         const prompt = this.buildPrompt(existingToc, opts);
-
-        const requestBody = JSON.stringify({
-            contents: [{
-                parts: [
-                    { text: prompt },
-                    {
-                        inline_data: {
-                            mime_type: "application/pdf",
-                            data: base64Pdf
-                        }
-                    }
-                ]
-            }],
-            generationConfig: {
-                response_mime_type: "application/json",
-                response_schema: {
-                    type: "array",
-                    items: {
-                        type: "object",
-                        properties: {
-                            title: { type: "string" },
-                            page_number: { type: "integer" },
-                            level: { type: "integer" }
-                        },
-                        required: ["title", "page_number", "level"]
-                    }
+        const requestBody = JSON.stringify(this.buildGeminiRequest([
+            { text: prompt },
+            {
+                inline_data: {
+                    mime_type: "application/pdf",
+                    data: base64Pdf
                 }
             }
-        });
+        ]));
 
         // Retry logic for transient network errors
         const MAX_RETRIES = 3;
@@ -592,12 +750,11 @@ CRITICAL RULES FOR CHUNK MODE:
 
         for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
             try {
-                // Use XMLHttpRequest instead of fetch for better reliability with large payloads
                 const result = await new Promise((resolve, reject) => {
                     const xhr = new XMLHttpRequest();
-                    xhr.open('POST', 'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-flash-preview:generateContent?key=' + apiKey, true);
+                    xhr.open('POST', `https://generativelanguage.googleapis.com/v1beta/models/${this.getGeminiModel()}:generateContent?key=` + apiKey, true);
                     xhr.setRequestHeader('Content-Type', 'application/json');
-                    xhr.timeout = 5 * 60 * 1000; // 5 minute timeout
+                    xhr.timeout = 5 * 60 * 1000;
 
                     xhr.onload = () => {
                         if (xhr.status >= 200 && xhr.status < 300) {
@@ -614,21 +771,18 @@ CRITICAL RULES FOR CHUNK MODE:
                 });
 
                 const data = JSON.parse(result.text);
-                const textContent = data.candidates[0].content.parts[0].text;
-                return JSON.parse(textContent);
+                return this.parseGeminiBookmarksFromPayload(data);
 
             } catch (e) {
                 lastError = e;
-                const isNetworkError = e.message && (e.message.includes('NetworkError') || e.message.includes('Timeout'));
+                const isNetworkError = e.message && /(NetworkError|Timeout|timeout|aborted)/.test(e.message);
                 this.log(`API call attempt ${attempt}/${MAX_RETRIES} failed: ${e.message}`);
 
                 if (attempt < MAX_RETRIES && isNetworkError) {
-                    // Wait before retry: 2s, 4s, 8s
                     const waitMs = Math.pow(2, attempt) * 1000;
                     this.log(`Waiting ${waitMs}ms before retry...`);
                     await Zotero.Promise.delay(waitMs);
                 } else if (!isNetworkError) {
-                    // Non-network errors (like 400) should not retry
                     throw e;
                 }
             }
@@ -641,27 +795,20 @@ CRITICAL RULES FOR CHUNK MODE:
         const apiKey = this.getApiKey();
         const prompt = this.buildPrompt(existingToc, opts);
 
-        const response = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=' + apiKey, {
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${this.getGeminiModel()}:generateContent?key=` + apiKey, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({
-                contents: [{
-                    parts: [
-                        { text: prompt + "\n\nIMPORTANT: Output ONLY a valid JSON array, no markdown, no explanation." },
-                        {
-                            file_data: {
-                                mime_type: "application/pdf",
-                                file_uri: fileUri
-                            }
-                        }
-                    ]
-                }],
-                generationConfig: {
-                    response_mime_type: "application/json"
+            body: JSON.stringify(this.buildGeminiRequest([
+                { text: prompt + "\n\nIMPORTANT: Output ONLY a valid JSON array, no markdown, no explanation." },
+                {
+                    file_data: {
+                        mime_type: "application/pdf",
+                        file_uri: fileUri
+                    }
                 }
-            })
+            ]))
         });
 
         if (!response.ok) {
@@ -670,8 +817,7 @@ CRITICAL RULES FOR CHUNK MODE:
         }
 
         const data = await response.json();
-        const textContent = data.candidates[0].content.parts[0].text;
-        return JSON.parse(textContent);
+        return this.parseGeminiBookmarksFromPayload(data);
     },
 
     async applyBookmarks(pdfPath, pdfBytes, bookmarks) {
@@ -802,7 +948,7 @@ CRITICAL RULES FOR CHUNK MODE:
         progressWin.show();
         let itemProgress = new progressWin.ItemProgress(
             "Processing PDF...",
-            "Analyzing " + filePath.split('/').pop()
+            "Analyzing " + this.getDisplayNameFromPath(filePath)
         );
         itemProgress.setProgress(5);
 
@@ -827,91 +973,110 @@ CRITICAL RULES FOR CHUNK MODE:
         }
     },
 
-    addToWindow(window) {
-        let doc = window.document;
-
-        let toolsMenu = doc.getElementById('menu_ToolsPopup');
-        if (toolsMenu) {
-            if (toolsMenu.querySelector('#pdf-ai-bookmarks-menu')) return;
-
-            this.log("Adding menu item to window: " + doc.title);
-
-            let menuitem = doc.createXULElement('menuitem');
-            menuitem.id = 'pdf-ai-bookmarks-menu';
-            menuitem.setAttribute('label', 'Generate PDF AI Bookmarks');
-            menuitem.addEventListener('command', async () => {
-                let attachment = null;
-
-                // Prefer active reader attachment (matches prior button behavior)
-                try {
-                    let win = Zotero.getMainWindow();
-                    let tabID = win && win.Zotero_Tabs ? win.Zotero_Tabs.selectedID : null;
-                    if (tabID && Zotero.Reader && Zotero.Reader.getByTabID) {
-                        let reader = Zotero.Reader.getByTabID(tabID);
-                        if (reader && reader.itemID) {
-                            attachment = Zotero.Items.get(reader.itemID);
-                        }
-                    }
-                } catch (e) {
-                    this.log("Failed to detect active reader: " + e);
-                }
-
-                // Fallback: use selected item/attachment
-                if (!attachment) {
-                    let pane = Zotero.getActiveZoteroPane();
-                    let items = pane.getSelectedItems();
-                    let selectedItem = items && items.length ? items[0] : null;
-
-                    if (selectedItem) {
-                        if (selectedItem.isAttachment && selectedItem.isAttachment()
-                            && selectedItem.isPDFAttachment && selectedItem.isPDFAttachment()) {
-                            attachment = selectedItem;
-                        } else if (selectedItem.getAttachments) {
-                            let attachmentIDs = selectedItem.getAttachments();
-                            let pdfAttachments = attachmentIDs
-                                .map(id => Zotero.Items.get(id))
-                                .filter(att => att && att.isAttachment && att.isAttachment()
-                                    && att.isPDFAttachment && att.isPDFAttachment());
-
-                            if (pdfAttachments.length) {
-                                attachment = pdfAttachments[0];
-                                this.log("Multiple PDFs found; using first attachment");
-                            }
-                        }
-                    }
-                }
-
-                if (attachment) {
-                    await this.runBookmarkGenerator(null, attachment);
-                } else {
-                    window.alert("Please select a PDF attachment or open a PDF in the reader.");
-                }
-            });
-
-            toolsMenu.appendChild(menuitem);
-            this.addedElementIDs.push('pdf-ai-bookmarks-menu');
+    registerMenu() {
+        if (!Zotero.MenuManager || typeof Zotero.MenuManager.registerMenu !== "function") {
+            throw new Error("Zotero.MenuManager is unavailable");
         }
+
+        if (this.menuRegistrationID) {
+            return this.menuRegistrationID;
+        }
+
+        this.menuRegistrationID = Zotero.MenuManager.registerMenu({
+            menuID: this.menuID,
+            pluginID: this.pluginID || this.id,
+            target: "main/menubar/tools",
+            menus: [{
+                menuType: "menuitem",
+                onShowing: (_event, context) => this.applyMenuLabel(context),
+                onShown: (_event, context) => this.applyMenuLabel(context),
+                onCommand: () => {
+                    this.handleMenuCommand().catch((e) => {
+                        Zotero.logError(e);
+                        Zotero.getMainWindow().alert("Error: " + e.message);
+                    });
+                }
+            }]
+        });
+
+        return this.menuRegistrationID;
     },
 
-    removeFromWindow(window) {
-        let doc = window.document;
-        for (let id of this.addedElementIDs) {
-            let elem = doc.getElementById(id);
-            if (elem) elem.remove();
+    unregisterMenu(menuRegistrationID = null) {
+        const registrationID = menuRegistrationID || this.menuRegistrationID;
+        if (registrationID && Zotero.MenuManager && typeof Zotero.MenuManager.unregisterMenu === "function") {
+            Zotero.MenuManager.unregisterMenu(registrationID);
         }
+
+        this.menuRegistrationID = null;
+    },
+
+    resolveCurrentAttachment() {
+        let attachment = null;
+
+        try {
+            const win = Zotero.getMainWindow();
+            const tabID = win && win.Zotero_Tabs ? win.Zotero_Tabs.selectedID : null;
+            if (tabID && Zotero.Reader && Zotero.Reader.getByTabID) {
+                const reader = Zotero.Reader.getByTabID(tabID);
+                if (reader && reader.itemID) {
+                    attachment = Zotero.Items.get(reader.itemID);
+                }
+            }
+        } catch (e) {
+            this.log("Failed to detect active reader: " + e);
+        }
+
+        if (attachment) {
+            return attachment;
+        }
+
+        const pane = Zotero.getActiveZoteroPane();
+        const items = pane ? pane.getSelectedItems() : [];
+        const selectedItem = items && items.length ? items[0] : null;
+
+        if (!selectedItem) {
+            return null;
+        }
+
+        if (selectedItem.isAttachment && selectedItem.isAttachment()
+            && selectedItem.isPDFAttachment && selectedItem.isPDFAttachment()) {
+            return selectedItem;
+        }
+
+        if (!selectedItem.getAttachments) {
+            return null;
+        }
+
+        const attachmentIDs = selectedItem.getAttachments();
+        const pdfAttachments = attachmentIDs
+            .map(id => Zotero.Items.get(id))
+            .filter(att => att && att.isAttachment && att.isAttachment()
+                && att.isPDFAttachment && att.isPDFAttachment());
+
+        if (pdfAttachments.length > 1) {
+            this.log("Multiple PDFs found; using first attachment");
+        }
+
+        return pdfAttachments[0] || null;
+    },
+
+    addToWindow(window) {
+        this.ensureWindowLocale(window);
     },
 
     addToAllWindows() {
-        var windows = Zotero.getMainWindows();
-        for (let win of windows) {
+        for (const win of Zotero.getMainWindows()) {
             this.addToWindow(win);
         }
     },
 
-    removeFromAllWindows() {
-        var windows = Zotero.getMainWindows();
-        for (let win of windows) {
-            this.removeFromWindow(win);
+    async handleMenuCommand() {
+        const attachment = this.resolveCurrentAttachment();
+        if (!attachment) {
+            throw new Error("Please select a PDF attachment or open a PDF in the reader.");
         }
+
+        await this.runBookmarkGenerator(null, attachment);
     }
 };
