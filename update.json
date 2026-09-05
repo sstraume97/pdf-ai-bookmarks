@@ -5,7 +5,7 @@
         {
           "version": "1.0.3",
           "update_link": "https://github.com/edwintuan/pdf-ai-bookmarks/releases/download/xpi/pdf-ai-bookmarks.xpi",
-          "update_hash": "sha512:c053e2ac9ac99d70f5ffeb243246822af6d81c39e519ea0057472f862e834d6eef5a622ab5eed4537337b147903149d8d9fd0445f6ecc046156080cba3f0b367",
+          "update_hash": "sha512:b44da9634563dc14f7ce792b46c5c8966b6d988018b1c3abfb3098c8d15857f07f64dc8b305aba3c92de2f0d10795df3519c8932bb510d6b32e2aa8fdf500c28",
           "applications": {
             "zotero": {
               "strict_min_version": "8.0",
