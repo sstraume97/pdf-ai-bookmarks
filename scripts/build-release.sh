@@ -53,7 +53,7 @@ payload = {
                     "applications": {
                         "zotero": {
                             "strict_min_version": "8.0",
-                            "strict_max_version": "9.*",
+                            "strict_max_version": "10.*",
                         }
                     },
                 }

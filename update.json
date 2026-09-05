@@ -3,13 +3,13 @@
     "pdf-ai-bookmarks@edwintuan.com": {
       "updates": [
         {
-          "version": "1.0.2",
+          "version": "1.0.3",
           "update_link": "https://github.com/edwintuan/pdf-ai-bookmarks/releases/download/xpi/pdf-ai-bookmarks.xpi",
           "update_hash": "sha512:c053e2ac9ac99d70f5ffeb243246822af6d81c39e519ea0057472f862e834d6eef5a622ab5eed4537337b147903149d8d9fd0445f6ecc046156080cba3f0b367",
           "applications": {
             "zotero": {
               "strict_min_version": "8.0",
-              "strict_max_version": "9.*"
+              "strict_max_version": "10.*"
             }
           }
         }

@@ -1,6 +1,6 @@
 # PDF AI Bookmarks for Zotero
 
-A Zotero 8/9 plugin that automatically generates hierarchical PDF bookmarks (outlines/table of contents) using Google's Gemini AI.
+A Zotero 8/9/10 plugin that automatically generates hierarchical PDF bookmarks (outlines/table of contents) using Google's Gemini AI.
 
 ## Features
 
@@ -35,7 +35,7 @@ Automatic updates are served from [raw `update.json`](https://raw.githubusercont
 
 ## Requirements
 
-- Zotero 8.0 or 9.x
+- Zotero 8.0, 9.x, or 10.x
 - Google Gemini API key (free tier available)
 
 ## How It Works
